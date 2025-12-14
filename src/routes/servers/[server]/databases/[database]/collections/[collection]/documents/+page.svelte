@@ -23,7 +23,7 @@
 	import type { MongoDocument, SearchParams } from "$lib/types";
 	import { formatNumber } from "$lib/utils/filters";
 	import { parseJSON, serializeForEditing } from "$lib/utils/jsonParser";
-	import { SvelteURLSearchParams } from "svelte/reactivity";
+	import { SvelteSet, SvelteURLSearchParams } from "svelte/reactivity";
 	import type { PageData } from "./$types";
 
 	let { data }: { data: PageData } = $props();
@@ -34,6 +34,7 @@
 	let updateQuery = $state("{}");
 	let isUpdating = $state(false);
 	let showInsertEditor = $state(false);
+	let viewMode = $state<"documents" | "table">("documents");
 
 	// Explain state
 	let explainLoading = $state(false);
@@ -89,6 +90,12 @@
 				notificationStore.notifyError(result.error);
 			}
 		});
+	});
+
+	$effect(() => {
+		if (editMode && viewMode === "table") {
+			viewMode = "documents";
+		}
 	});
 
 	let modifiedItems = $state<MongoDocument[] | null>(null);
@@ -152,6 +159,61 @@
 		} catch (error) {
 			notificationStore.notifyError(error, "Failed to remove document");
 		}
+	}
+
+	function getTableColumns(rows: MongoDocument[]): string[] {
+		const keys = new SvelteSet<string>();
+
+		for (const row of rows) {
+			Object.keys(row ?? {}).forEach((key) => keys.add(key));
+		}
+
+		return Array.from(keys).sort((a, b) => {
+			if (a === "_id") return -1;
+			if (b === "_id") return 1;
+			return a.localeCompare(b);
+		});
+	}
+
+	function getIdValue(val: unknown): string | null {
+		if (val === null || val === undefined) return null;
+		if (typeof val === "string" || typeof val === "number") return String(val);
+		if (typeof val === "object") {
+			const obj = val as Record<string, unknown>;
+			if (typeof obj.$value === "string" || typeof obj.$value === "number") {
+				return String(obj.$value);
+			}
+		}
+		return null;
+	}
+
+	function formatTableValue(value: unknown): string {
+		if (value === null || value === undefined) return "";
+		if (typeof value === "string") {
+			return value.length > 100 ? `${value.slice(0, 100)}...` : value;
+		}
+		if (typeof value === "number" || typeof value === "boolean") {
+			return String(value);
+		}
+		if (Array.isArray(value)) {
+			return `Array[${value.length}]`;
+		}
+		if (typeof value === "object") {
+			const obj = value as Record<string, unknown>;
+			if (obj.$value !== undefined) {
+				return formatTableValue(obj.$value);
+			}
+			const entries = Object.entries(obj);
+			const count = entries.length;
+			if (count === 0) {
+				return "{} (0 fields)";
+			}
+			const [firstKey, firstVal] = entries[0];
+			const previewValue = formatTableValue(firstVal);
+			const suffix = count === 1 ? "1 field" : `${count} fields`;
+			return `{${firstKey}:${previewValue}} (${suffix})`;
+		}
+		return String(value);
 	}
 
 	function buildUrl(skip: number) {
@@ -524,6 +586,29 @@
 	</button>
 {/snippet}
 
+{#snippet viewToggle()}
+	<div class="inline-flex rounded-lg border border-[var(--border-color)] overflow-hidden">
+		<button
+			type="button"
+			class="px-3 py-1 text-[13px] border-r border-[var(--border-color)] transition"
+			style:color={viewMode === "documents" ? "var(--text)" : "var(--text-secondary)"}
+			style:background-color={viewMode === "documents" ? "var(--color-3)" : "var(--light-background)"}
+			onclick={() => (viewMode = "documents")}
+		>
+			Documents
+		</button>
+		<button
+			type="button"
+			class="px-3 py-1 text-[13px] transition"
+			style:color={viewMode === "table" ? "var(--text)" : "var(--text-secondary)"}
+			style:background-color={viewMode === "table" ? "var(--color-3)" : "var(--light-background)"}
+			onclick={() => (viewMode = "table")}
+		>
+			Table
+		</button>
+	</div>
+{/snippet}
+
 <SearchBox
 	bind:params
 	bind:editMode
@@ -786,6 +871,7 @@
 					{@render nextButton(nextUrl, navigateNext)}
 				{/if}
 			{/if}
+			{@render viewToggle()}
 		{/snippet}
 	</Panel>
 {:then resultsData}
@@ -814,6 +900,7 @@
 				{:else}
 					{@render sortButton()}
 				{/if}
+				{@render viewToggle()}
 			{/snippet}
 		</Panel>
 	{:then countData}
@@ -847,25 +934,84 @@
 					{:else}
 						{@render sortButton()}
 					{/if}
+					{@render viewToggle()}
 				{/snippet}
 			</Panel>
 		{/if}
 	{/await}
 
-	{#each items as item, index (item._id?.$value || index)}
-		<PrettyJson
-			json={item}
-			autoCollapse={true}
-			onedit={data.params.mode === "aggregation" || data.params.mode === "distinct" || data.readOnly
-				? undefined
-				: (json) => editDocument(item._id, json, items)}
-			onremove={data.params.mode === "aggregation" || data.params.mode === "distinct" || data.readOnly
-				? undefined
-				: () => removeDocument(item._id, items)}
-			server={data.server}
-			database={data.database}
-			collection={data.collection}
-			mappings={data.mappings}
-		/>
-	{/each}
+	{#if viewMode === "table"}
+		{#if items.length === 0}
+			<div
+				class="mt-3 rounded-2xl border border-[var(--border-color)] bg-[var(--light-background)]/70 shadow-sm p-4 text-center text-sm"
+				style="color: var(--text-secondary);"
+			>
+				No data to display.
+			</div>
+		{:else}
+			{@const columns = getTableColumns(items)}
+			<div
+				class="mt-3 overflow-x-auto rounded-2xl border border-[var(--border-color)] bg-[var(--light-background)]/70 shadow-sm"
+			>
+				<table class="min-w-full text-sm">
+					<thead>
+						<tr class="border-b border-[var(--border-color)]">
+							{#each columns as column (column)}
+								<th class="text-left px-4 py-2 font-semibold" style="color: var(--text);">
+									{column}
+								</th>
+							{/each}
+						</tr>
+					</thead>
+					<tbody>
+						{#each items as item, index (item._id?.$value || index)}
+							<tr class="border-b border-[var(--border-color)]/60 last:border-b-0">
+								{#each columns as column (column)}
+									{@const cellValue = (item as Record)[column]}
+									{@const formatted = formatTableValue(cellValue)}
+									<td class="px-4 py-2 align-top text-[13px] break-words" style="color: var(--text);" title={formatted}>
+										{#if column === "_id"}
+											{@const idValue = getIdValue(cellValue)}
+											{#if idValue}
+												<a
+													class="no-underline hover:underline"
+													style="color: var(--link);"
+													href={resolve(
+														`/servers/${encodeURIComponent(data.server)}/databases/${encodeURIComponent(data.database)}/collections/${encodeURIComponent(data.collection)}/documents/${encodeURIComponent(idValue)}`,
+													)}
+												>
+													{formatted || idValue}
+												</a>
+											{:else}
+												{formatted}
+											{/if}
+										{:else}
+											{formatted}
+										{/if}
+									</td>
+								{/each}
+							</tr>
+						{/each}
+					</tbody>
+				</table>
+			</div>
+		{/if}
+	{:else}
+		{#each items as item, index (item._id?.$value || index)}
+			<PrettyJson
+				json={item}
+				autoCollapse={true}
+				onedit={data.params.mode === "aggregation" || data.params.mode === "distinct" || data.readOnly
+					? undefined
+					: (json) => editDocument(item._id, json, items)}
+				onremove={data.params.mode === "aggregation" || data.params.mode === "distinct" || data.readOnly
+					? undefined
+					: () => removeDocument(item._id, items)}
+				server={data.server}
+				database={data.database}
+				collection={data.collection}
+				mappings={data.mappings}
+			/>
+		{/each}
+	{/if}
 {/await}
